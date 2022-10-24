@@ -1,11 +1,14 @@
+#!/usr/bin/env python3
 import argparse
 import itertools
 import math
 import os
 from pathlib import Path
 from typing import Optional
-import subprocess
+from subprocess import PIPE, run
 import sys
+import shutil
+import re
 
 import torch
 import torch.nn.functional as F
@@ -22,7 +25,7 @@ from PIL import Image
 from torchvision import transforms
 from tqdm.auto import tqdm
 from transformers import CLIPTextModel, CLIPTokenizer
-
+# from colorama import Fore
 
 logger = get_logger(__name__)
 
@@ -201,17 +204,39 @@ def parse_args():
         "--save_starting_step",
         type=int,
         default=0,
-        help=("The step from which it starts saving intermediary checkpoints"),
+        help=("The step from which it starts counting to save the checkpoint"),
     )
     
-    
-    parser.add_argument(
-        "--image_captions_filename",
-        action="store_true",
-        help="Get captions from filename",
-    )    
 
     parser.add_argument("--local_rank", type=int, default=-1, help="For distributed training: local_rank")
+
+    parser.add_argument(
+        "--ckpt_output",
+        type=str,
+        help=(
+            "Filepath of where you want to save the finished checkpoint."
+            "If the directory of the file does not exist, it will be created recursively."
+        ),
+    )
+    parser.add_argument(
+        "--ckpt_name",
+        type=str,
+        help=("Base name for the converted .ckpt files"),
+    )
+    parser.add_argument(
+        "--diffusers_conversion_path",
+        type=str,
+        # Get the relative path to convert_diffusers_to_original_stable_diffusion.py
+        default=os.path.join(os.path.dirname(os.path.realpath(__file__)), '..', '..', 'scripts', 'convert_diffusers_to_original_stable_diffusion.py'),
+        help="Path to the script to convert the Diffusers weights to .ckpt file",
+    )
+
+    parser.add_argument(
+        "--save_manual",
+        type=int,
+        nargs='*',
+        help=("Save the model on these specific steps."),
+    )
 
     args = parser.parse_args()
     env_local_rank = int(os.environ.get("LOCAL_RANK", -1))
@@ -227,7 +252,58 @@ def parse_args():
         if args.class_prompt is None:
             raise ValueError("You must specify prompt for class images.")
 
+    if args.ckpt_output is not None:
+        # Make sure the arg ends with .ckpt
+        if not re.match(r'^.*?\.ckpt$', args.ckpt_output):
+            raise ValueError(f'Invalid ckpt_output path: {args.ckpt_output}. Path must end with ".ckpt"')
+
+    if args.diffusers_conversion_path is not None:
+        if not os.path.isfile(args.diffusers_conversion_path):
+            raise ValueError(f'Conversion script not found: {args.diffusers_conversion_path}')
+
     return args
+
+
+def save_checkpoint(input_ckpt, output_ckpt_filepath, accelerator, args):
+    """
+    Save a converted checkpoint file.
+    """
+    # print(Fore.GREEN + f'SAVING CHECKPOINT: {output_ckpt_file}')
+    if accelerator.is_main_process:
+        print('Converting diffusers model to Stable Diffusion format...')
+        print('Output checkpoint file:', output_ckpt_filepath)
+        s = run([os.path.realpath(sys.executable), args.diffusers_conversion_path, '--model_path', input_ckpt, '--checkpoint_path', output_ckpt_filepath, '--half'], stdout=PIPE, stderr=PIPE, universal_newlines=True)  # shell=True
+        if s.returncode != 0:
+            print('Failed to convert! Subprocess output:')
+            print('stdout:', s.stdout)
+            print('stderr:', s.stderr)
+
+
+def save_diffusers(output_dir, step_num, accelerator, unet, text_encoder, args):
+    """
+    Save the in-progress model weights and a converted checkpoint.
+    """
+    ckpt_name = 'dreambooth' if not args.ckpt_name else str(args.ckpt_name)
+    step_str = f'-{step_num}' if step_num is not False else ''
+    output_diffusers_dir = Path(output_dir) / f'{ckpt_name}{step_str}'
+
+    if not os.path.exists(output_diffusers_dir):
+        os.makedirs(output_diffusers_dir)
+
+    # Create the pipeline using the trained modules and save it.
+    # print(Fore.GREEN + f'SAVING CHECKPOINT: {output_ckpt_file}')
+    print('Saving checkpoint to', output_diffusers_dir)
+    if accelerator.is_main_process:
+        pipeline = StableDiffusionPipeline.from_pretrained(
+            args.pretrained_model_name_or_path,
+            unet=accelerator.unwrap_model(unet),
+            text_encoder=accelerator.unwrap_model(text_encoder),
+        )
+        pipeline.save_pretrained(output_diffusers_dir)
+
+        output_ckpt_filename = f'{str(output_diffusers_dir).rstrip("/")}.ckpt'
+        save_checkpoint(output_diffusers_dir, output_ckpt_filename, accelerator, args)
+        return output_ckpt_filename
 
 
 class DreamBoothDataset(Dataset):
@@ -241,7 +317,6 @@ class DreamBoothDataset(Dataset):
         instance_data_root,
         instance_prompt,
         tokenizer,
-        args,
         class_data_root=None,
         class_prompt=None,
         size=512,
@@ -250,7 +325,6 @@ class DreamBoothDataset(Dataset):
         self.size = size
         self.center_crop = center_crop
         self.tokenizer = tokenizer
-        self.image_captions_filename = None
 
         self.instance_data_root = Path(instance_data_root)
         if not self.instance_data_root.exists():
@@ -261,9 +335,6 @@ class DreamBoothDataset(Dataset):
         self.instance_prompt = instance_prompt
         self._length = self.num_instance_images
 
-        if args.image_captions_filename:
-            self.image_captions_filename = True
-        
         if class_data_root is not None:
             self.class_data_root = Path(class_data_root)
             self.class_data_root.mkdir(parents=True, exist_ok=True)
@@ -288,27 +359,12 @@ class DreamBoothDataset(Dataset):
 
     def __getitem__(self, index):
         example = {}
-        path = self.instance_images_path[index % self.num_instance_images]
-        instance_image = Image.open(path)
+        instance_image = Image.open(self.instance_images_path[index % self.num_instance_images])
         if not instance_image.mode == "RGB":
             instance_image = instance_image.convert("RGB")
-            
-        instance_prompt = self.instance_prompt
-        
-        if self.image_captions_filename:
-            filename = Path(path).stem
-            pt=''.join([i for i in filename if not i.isdigit()])
-            pt=pt.replace("_"," ")
-            pt=pt.replace("(","")
-            pt=pt.replace(")","")
-            instance_prompt = instance_prompt + " " + pt
-            sys.stdout.write(" [0;32m" +instance_prompt+" [0m")
-            sys.stdout.flush()
-
-
         example["instance_images"] = self.image_transforms(instance_image)
         example["instance_prompt_ids"] = self.tokenizer(
-            instance_prompt,
+            self.instance_prompt,
             padding="do_not_pad",
             truncation=True,
             max_length=self.tokenizer.model_max_length,
@@ -360,7 +416,11 @@ def get_full_repo_name(model_id: str, organization: Optional[str] = None, token:
 def main():
     args = parse_args()
     logging_dir = Path(args.output_dir, args.logging_dir)
-    i=args.save_starting_step
+
+    # TensorFlow will get upset if we pass it a dict
+    save_manual = args.save_manual
+    del args.save_manual
+
     accelerator = Accelerator(
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         mixed_precision=args.mixed_precision,
@@ -389,7 +449,10 @@ def main():
         if cur_class_images < args.num_class_images:
             torch_dtype = torch.float16 if accelerator.device.type == "cuda" else torch.float32
             pipeline = StableDiffusionPipeline.from_pretrained(
-                args.pretrained_model_name_or_path, torch_dtype=torch_dtype
+                args.pretrained_model_name_or_path,
+                torch_dtype=torch_dtype,
+                # Setting the safety checker to null allows us to resume from a diffusers checkpoint that doesn't have one
+                safety_checker=None,
             )
             pipeline.set_progress_bar_config(disable=True)
 
@@ -493,7 +556,6 @@ def main():
         tokenizer=tokenizer,
         size=args.resolution,
         center_crop=args.center_crop,
-        args=args,
     )
 
     def collate_fn(examples):
@@ -650,39 +712,23 @@ def main():
             if global_step >= args.max_train_steps:
                 break
 
-            
-            if args.save_n_steps >= 200:
-               if global_step < args.max_train_steps and global_step+1==i:
-                  ckpt_name = "_step_" + str(global_step+1)
-                  save_dir = Path(args.output_dir+ckpt_name)
-                  save_dir=str(save_dir)
-                  save_dir=save_dir.replace(" ", "_")                    
-                  if not os.path.exists(save_dir): # create dir if not exists
-                     os.mkdir(save_dir)
-                  inst=save_dir[16:]
-                  inst=inst.replace(" ", "_")
-                  print(" [1;32mSAVING CHECKPOINT: /content/gdrive/MyDrive/"+inst+".ckpt")
-                  # Create the pipeline using the trained modules and save it.
-                  if accelerator.is_main_process:
-                     pipeline = StableDiffusionPipeline.from_pretrained(
-                           args.pretrained_model_name_or_path,
-                           unet=accelerator.unwrap_model(unet),
-                           text_encoder=accelerator.unwrap_model(text_encoder),
-                     )
-                     pipeline.save_pretrained(save_dir)
-                     chkpth="/content/gdrive/MyDrive/"+inst+".ckpt"
-                     subprocess.call('python /content/diffusers/scripts/convert_diffusers_to_original_stable_diffusion.py --model_path ' + save_dir + ' --checkpoint_path ' + chkpth + ' --half', shell=True)
-                     i=i+args.save_n_steps
+            # Handle --save_n_steps in the first part, --save_manual in the second
+            if (args.save_n_steps is not None and args.save_n_steps >= 200 and args.save_starting_step < global_step and global_step % args.save_n_steps == 0) or (save_manual is not None and global_step in save_manual):
+                save_diffusers(args.output_dir, global_step + 1, accelerator, unet, text_encoder, args)
         accelerator.wait_for_everyone()
 
-    # Create the pipeline using using the trained modules and save it.
+    # Create the pipeline using the trained modules and save it.
     if accelerator.is_main_process:
-        pipeline = StableDiffusionPipeline.from_pretrained(
-            args.pretrained_model_name_or_path,
-            unet=accelerator.unwrap_model(unet),
-            text_encoder=accelerator.unwrap_model(text_encoder),
-        )
-        pipeline.save_pretrained(args.output_dir)
+        # Save the final checkpoint
+        output_ckpt_filename = save_diffusers(args.output_dir, global_step + 1, accelerator, unet, text_encoder, args)
+
+        # Copy the final ckpt to wherever the user wants
+        if args.ckpt_output is not None:
+            directory, filename = os.path.split(args.ckpt_output)
+            if not os.path.exists(directory):
+                os.makedirs(directory)
+            print('Creating', args.ckpt_output)
+            shutil.copyfile(output_ckpt_filename, args.ckpt_output)
 
         if args.push_to_hub:
             repo.push_to_hub(commit_message="End of training", blocking=False, auto_lfs_prune=True)
