@@ -218,6 +218,11 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--ckpt_name",
+        type=str,
+        help=("Base name for the converted .ckpt files"),
+    )
+    parser.add_argument(
         "--diffusers_conversion_path",
         type=str,
         # Get the relative path to convert_diffusers_to_original_stable_diffusion.py
@@ -247,7 +252,7 @@ def parse_args():
     return args
 
 
-def save_checkpoint(output_ckpt_filepath, accelerator, args):
+def save_checkpoint(input_ckpt, output_ckpt_filepath, accelerator, args):
     """
     Save a converted checkpoint file.
     """
@@ -255,7 +260,7 @@ def save_checkpoint(output_ckpt_filepath, accelerator, args):
     if accelerator.is_main_process:
         print('Converting diffusers model to Stable Diffusion format...')
         print('Output checkpoint file:', output_ckpt_filepath)
-        s = run([os.path.realpath(sys.executable), args.diffusers_conversion_path, '--model_path', args.output_dir, '--checkpoint_path', output_ckpt_filepath, '--half'], stdout=PIPE, stderr=PIPE, universal_newlines=True)  # shell=True
+        s = run([os.path.realpath(sys.executable), args.diffusers_conversion_path, '--model_path', input_ckpt, '--checkpoint_path', output_ckpt_filepath, '--half'], stdout=PIPE, stderr=PIPE, universal_newlines=True)  # shell=True
         if s.returncode != 0:
             print('Failed to convert! Subprocess output:')
             print('stdout:', s.stdout)
@@ -268,7 +273,9 @@ def save_diffusers(output_dir, step_num, accelerator, unet, args, finished=None)
     """
     Save the in-progress model weights and a converted checkpoint.
     """
-    output_diffusers_dir = Path(output_dir) / f'dreambooth-{step_num}'
+    ckpt_name = 'dreambooth' if not args.ckpt_name else str(args.ckpt_name)
+    step_str = f'-{step_num}' if step_num is not False else ''
+    output_diffusers_dir = Path(output_dir) / f'{ckpt_name}{step_str}'
 
     if not os.path.exists(output_diffusers_dir):
         os.makedirs(output_diffusers_dir)
@@ -284,15 +291,8 @@ def save_diffusers(output_dir, step_num, accelerator, unet, args, finished=None)
         pipeline.save_pretrained(output_diffusers_dir)
 
         output_ckpt_filename = f'{str(output_diffusers_dir).rstrip("/")}.ckpt'
-        save_checkpoint(output_ckpt_filename, accelerator, args)
-
-        # Copy the ckpt to wherever the user wants
-        if finished is True and args.ckpt_output is not None:
-            directory, filename = os.path.split(args.ckpt_output)
-            if not os.path.exists(directory):
-                os.makedirs(directory)
-            print('Creating', args.ckpt_output)
-            shutil.copyfile(output_ckpt_filename, args.ckpt_output)
+        save_checkpoint(output_diffusers_dir, output_ckpt_filename, accelerator, args)
+        return output_ckpt_filename
 
 
 class DreamBoothDataset(Dataset):
@@ -704,7 +704,15 @@ def main():
 
     # Create the pipeline using the trained modules and save it.
     if accelerator.is_main_process:
-        save_diffusers(args.output_dir, global_step + 1, accelerator, unet, args, True)
+        output_ckpt_filename = save_diffusers(args.output_dir, global_step + 1, accelerator, unet, args, True)
+
+        # Copy the final ckpt to wherever the user wants
+        if args.ckpt_output is not None:
+            directory, filename = os.path.split(args.ckpt_output)
+            if not os.path.exists(directory):
+                os.makedirs(directory)
+            print('Creating', args.ckpt_output)
+            shutil.copyfile(output_ckpt_filename, args.ckpt_output)
 
         if args.push_to_hub:
             repo.push_to_hub(commit_message="End of training", blocking=False, auto_lfs_prune=True)
