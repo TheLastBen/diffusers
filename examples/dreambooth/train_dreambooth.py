@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 import argparse
 import itertools
 import math
@@ -255,6 +256,10 @@ def parse_args():
         # Make sure the arg ends with .ckpt
         if not re.match(r'^.*?\.ckpt$', args.ckpt_output):
             raise ValueError(f'Invalid ckpt_output path: {args.ckpt_output}. Path must end with ".ckpt"')
+
+    if args.diffusers_conversion_path is not None:
+        if not os.path.isfile(args.diffusers_conversion_path):
+            raise ValueError(f'Conversion script not found: {args.diffusers_conversion_path}')
 
     return args
 
