@@ -4,7 +4,10 @@ import math
 import os
 from pathlib import Path
 from typing import Optional
-import subprocess
+from subprocess import PIPE, run
+import sys
+import shutil
+import re
 
 import torch
 import torch.nn.functional as F
@@ -21,7 +24,7 @@ from PIL import Image
 from torchvision import transforms
 from tqdm.auto import tqdm
 from transformers import CLIPTextModel, CLIPTokenizer
-
+# from colorama import Fore
 
 logger = get_logger(__name__)
 
@@ -206,6 +209,22 @@ def parse_args():
 
     parser.add_argument("--local_rank", type=int, default=-1, help="For distributed training: local_rank")
 
+    parser.add_argument(
+        "--ckpt_output",
+        type=str,
+        help=(
+            "Filepath of where you want to save the finished checkpoint."
+            "If the directory of the file does not exist, it will be created recursively."
+        ),
+    )
+    parser.add_argument(
+        "--diffusers_conversion_path",
+        type=str,
+        # Get the relative path to convert_diffusers_to_original_stable_diffusion.py
+        default=os.path.join(os.path.dirname(os.path.realpath(__file__)), '..', '..', 'scripts', 'convert_diffusers_to_original_stable_diffusion.py'),
+        help="Path to the script to convert the Diffusers weights to .ckpt file",
+    )
+
     args = parser.parse_args()
     env_local_rank = int(os.environ.get("LOCAL_RANK", -1))
     if env_local_rank != -1 and env_local_rank != args.local_rank:
@@ -220,7 +239,60 @@ def parse_args():
         if args.class_prompt is None:
             raise ValueError("You must specify prompt for class images.")
 
+    if args.ckpt_output is not None:
+        # Make sure the arg ends with .ckpt
+        if not re.match(r'^.*?\.ckpt$', args.ckpt_output):
+            raise ValueError(f'Invalid ckpt_output path: {args.ckpt_output}. Path must end with ".ckpt"')
+
     return args
+
+
+def save_checkpoint(output_ckpt_filepath, accelerator, args):
+    """
+    Save a converted checkpoint file.
+    """
+    # print(Fore.GREEN + f'SAVING CHECKPOINT: {output_ckpt_file}')
+    if accelerator.is_main_process:
+        print('Converting diffusers model to Stable Diffusion format...')
+        print('Output checkpoint file:', output_ckpt_filepath)
+        s = run([os.path.realpath(sys.executable), args.diffusers_conversion_path, '--model_path', args.output_dir, '--checkpoint_path', output_ckpt_filepath, '--half'], stdout=PIPE, stderr=PIPE, universal_newlines=True)  # shell=True
+        if s.returncode != 0:
+            print('Failed to convert! Subprocess output:')
+            print('stdout:', s.stdout)
+            print('stderr:', s.stderr)
+        else:
+            print('Done!')
+
+
+def save_diffusers(output_dir, step_num, accelerator, unet, args, finished=None):
+    """
+    Save the in-progress model weights and a converted checkpoint.
+    """
+    output_diffusers_dir = Path(output_dir) / f'dreambooth-{step_num}'
+
+    if not os.path.exists(output_diffusers_dir):
+        os.makedirs(output_diffusers_dir)
+
+    # Create the pipeline using the trained modules and save it.
+    # print(Fore.GREEN + f'SAVING CHECKPOINT: {output_ckpt_file}')
+    print('Saving checkpoint to', output_diffusers_dir)
+    if accelerator.is_main_process:
+        pipeline = StableDiffusionPipeline.from_pretrained(
+            args.pretrained_model_name_or_path,
+            unet=accelerator.unwrap_model(unet)
+        )
+        pipeline.save_pretrained(output_diffusers_dir)
+
+        output_ckpt_filename = f'{str(output_diffusers_dir).rstrip("/")}.ckpt'
+        save_checkpoint(output_ckpt_filename, accelerator, args)
+
+        # Copy the ckpt to wherever the user wants
+        if finished is True and args.ckpt_output is not None:
+            directory, filename = os.path.split(args.ckpt_output)
+            if not os.path.exists(directory):
+                os.makedirs(directory)
+            print('Creating', args.ckpt_output)
+            shutil.copyfile(output_ckpt_filename, args.ckpt_output)
 
 
 class DreamBoothDataset(Dataset):
@@ -362,7 +434,11 @@ def main():
         if cur_class_images < args.num_class_images:
             torch_dtype = torch.float16 if accelerator.device.type == "cuda" else torch.float32
             pipeline = StableDiffusionPipeline.from_pretrained(
-                args.pretrained_model_name_or_path, torch_dtype=torch_dtype
+                args.pretrained_model_name_or_path,
+                torch_dtype=torch_dtype,
+                # Setting the safety checker to null allows us to resume from a diffusers checkpoint that doesn't have one
+                feature_extractor=None,
+                safety_checker=None,
             )
             pipeline.set_progress_bar_config(disable=True)
 
@@ -622,37 +698,13 @@ def main():
             if global_step >= args.max_train_steps:
                 break
 
-            
-            if args.save_n_steps >= 200:
-               if global_step < args.max_train_steps and global_step+1==i:
-                  ckpt_name = "_step_" + str(global_step+1)
-                  save_dir = Path(args.output_dir+ckpt_name)
-                  save_dir=str(save_dir)
-                  save_dir=save_dir.replace(" ", "_")                    
-                  if not os.path.exists(save_dir): # create dir if not exists
-                     os.mkdir(save_dir)
-                  inst=save_dir[16:]
-                  inst=inst.replace(" ", "_")
-                  print(" [1;32mSAVING CHECKPOINT: /content/gdrive/MyDrive/"+inst+".ckpt")
-                  # Create the pipeline using the trained modules and save it.
-                  if accelerator.is_main_process:
-                      pipeline = StableDiffusionPipeline.from_pretrained(
-                                          args.pretrained_model_name_or_path, unet=accelerator.unwrap_model(unet)
-                      )
-                      pipeline.save_pretrained(save_dir)
-                      chkpth="/content/gdrive/MyDrive/"+inst+".ckpt"
-                      subprocess.call('python /content/diffusers/scripts/convert_diffusers_to_original_stable_diffusion.py --model_path ' + save_dir + ' --checkpoint_path ' + chkpth + ' --half', shell=True)
-                      i=i+args.save_n_steps
+            if args.save_n_steps >= 200 and global_step < args.max_train_steps and global_step % args.save_n_steps == 0:
+                save_diffusers(args.output_dir, global_step + 1, accelerator, unet, args)  # save the in-progress model and a converted checkpoint
         accelerator.wait_for_everyone()
 
-    # Create the pipeline using using the trained modules and save it.
+    # Create the pipeline using the trained modules and save it.
     if accelerator.is_main_process:
-        pipeline = StableDiffusionPipeline.from_pretrained(
-            args.pretrained_model_name_or_path,
-            unet=accelerator.unwrap_model(unet),
-            text_encoder=accelerator.unwrap_model(text_encoder),
-        )
-        pipeline.save_pretrained(args.output_dir)
+        save_diffusers(args.output_dir, global_step + 1, accelerator, unet, args, True)
 
         if args.push_to_hub:
             repo.push_to_hub(commit_message="End of training", blocking=False, auto_lfs_prune=True)
