@@ -230,6 +230,13 @@ def parse_args():
         help="Path to the script to convert the Diffusers weights to .ckpt file",
     )
 
+    parser.add_argument(
+        "--save_manual_steps",
+        type=list,
+        default=None,
+        help=("Save the model on these specific steps. Make sure to pass a list."),
+    )
+
     args = parser.parse_args()
     env_local_rank = int(os.environ.get("LOCAL_RANK", -1))
     if env_local_rank != -1 and env_local_rank != args.local_rank:
@@ -265,8 +272,6 @@ def save_checkpoint(input_ckpt, output_ckpt_filepath, accelerator, args):
             print('Failed to convert! Subprocess output:')
             print('stdout:', s.stdout)
             print('stderr:', s.stderr)
-        else:
-            print('Done!')
 
 
 def save_diffusers(output_dir, step_num, accelerator, unet, args, finished=None):
@@ -698,7 +703,7 @@ def main():
             if global_step >= args.max_train_steps:
                 break
 
-            if args.save_n_steps >= 200 and global_step < args.max_train_steps and global_step % args.save_n_steps == 0:
+            if (args.save_n_steps >= 200 and global_step < args.max_train_steps and global_step % args.save_n_steps == 0) or global_step in args.save_manual_steps:
                 save_diffusers(args.output_dir, global_step + 1, accelerator, unet, args)  # save the in-progress model and a converted checkpoint
         accelerator.wait_for_everyone()
 
