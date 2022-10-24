@@ -274,7 +274,7 @@ def save_checkpoint(input_ckpt, output_ckpt_filepath, accelerator, args):
             print('stderr:', s.stderr)
 
 
-def save_diffusers(output_dir, step_num, accelerator, unet, args, finished=None):
+def save_diffusers(output_dir, step_num, accelerator, unet, text_encoder, args, finished=None):
     """
     Save the in-progress model weights and a converted checkpoint.
     """
@@ -291,7 +291,8 @@ def save_diffusers(output_dir, step_num, accelerator, unet, args, finished=None)
     if accelerator.is_main_process:
         pipeline = StableDiffusionPipeline.from_pretrained(
             args.pretrained_model_name_or_path,
-            unet=accelerator.unwrap_model(unet)
+            unet=accelerator.unwrap_model(unet),
+            text_encoder=accelerator.unwrap_model(text_encoder),
         )
         pipeline.save_pretrained(output_diffusers_dir)
 
@@ -707,16 +708,15 @@ def main():
             if global_step >= args.max_train_steps:
                 break
 
-            # Do we save a checkpoint on the current global_step?
             # Handle --save_n_steps in the first part, --save_manual in the second
             if (args.save_n_steps is not None and args.save_n_steps >= 200 and args.save_starting_step < global_step and global_step % args.save_n_steps == 0) or (save_manual is not None and global_step in save_manual):
-                save_diffusers(args.output_dir, global_step + 1, accelerator, unet, args)
+                save_diffusers(args.output_dir, global_step + 1, accelerator, unet, text_encoder, args)
         accelerator.wait_for_everyone()
 
     # Create the pipeline using the trained modules and save it.
     if accelerator.is_main_process:
         # Save the final checkpoint
-        output_ckpt_filename = save_diffusers(args.output_dir, global_step + 1, accelerator, unet, args, True)
+        output_ckpt_filename = save_diffusers(args.output_dir, global_step + 1, accelerator, unet, text_encoder, args, True)
 
         # Copy the final ckpt to wherever the user wants
         if args.ckpt_output is not None:
