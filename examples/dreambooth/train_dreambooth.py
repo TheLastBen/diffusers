@@ -231,10 +231,10 @@ def parse_args():
     )
 
     parser.add_argument(
-        "--save_manual_steps",
-        type=list,
-        default=None,
-        help=("Save the model on these specific steps. Make sure to pass a list."),
+        "--save_manual",
+        type=int,
+        nargs='*',
+        help=("Save the model on these specific steps."),
     )
 
     args = parser.parse_args()
@@ -410,7 +410,11 @@ def get_full_repo_name(model_id: str, organization: Optional[str] = None, token:
 def main():
     args = parse_args()
     logging_dir = Path(args.output_dir, args.logging_dir)
-    i=args.save_starting_step
+
+    # TensorFlow will throw an error if we pass it a dict so this is a little hack to make it happy
+    save_manual = args.save_manual
+    del args.save_manual_steps  # just remove it lmao
+
     accelerator = Accelerator(
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         mixed_precision=args.mixed_precision,
@@ -703,12 +707,15 @@ def main():
             if global_step >= args.max_train_steps:
                 break
 
-            if (args.save_n_steps >= 200 and global_step < args.max_train_steps and global_step % args.save_n_steps == 0) or global_step in args.save_manual_steps:
-                save_diffusers(args.output_dir, global_step + 1, accelerator, unet, args)  # save the in-progress model and a converted checkpoint
+            # Do we save a checkpoint on the current global_step?
+            # Handle --save_n_steps in the first part, --save_manual in the second
+            if (args.save_n_steps is not None and args.save_n_steps >= 200 and args.save_starting_step < global_step and global_step % args.save_n_steps == 0) or (save_manual is not None and global_step in save_manual):
+                save_diffusers(args.output_dir, global_step + 1, accelerator, unet, args)
         accelerator.wait_for_everyone()
 
     # Create the pipeline using the trained modules and save it.
     if accelerator.is_main_process:
+        # Save the final checkpoint
         output_ckpt_filename = save_diffusers(args.output_dir, global_step + 1, accelerator, unet, args, True)
 
         # Copy the final ckpt to wherever the user wants
