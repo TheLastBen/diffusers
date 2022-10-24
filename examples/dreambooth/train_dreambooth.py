@@ -720,7 +720,7 @@ def main():
     # Create the pipeline using the trained modules and save it.
     if accelerator.is_main_process:
         # Save the final checkpoint
-        output_ckpt_filename = save_diffusers(args.output_dir, global_step + 1, accelerator, unet, text_encoder, args, True)
+        output_ckpt_filename = save_diffusers(args.output_dir, global_step + 1, accelerator, unet, text_encoder, args)
 
         # Copy the final ckpt to wherever the user wants
         if args.ckpt_output is not None:
