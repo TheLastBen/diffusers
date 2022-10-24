@@ -419,7 +419,7 @@ def main():
 
     # TensorFlow will get upset if we pass it a dict
     save_manual = args.save_manual
-    del args.save_manual_steps
+    del args.save_manual
 
     accelerator = Accelerator(
         gradient_accumulation_steps=args.gradient_accumulation_steps,
