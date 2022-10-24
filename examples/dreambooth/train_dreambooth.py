@@ -274,7 +274,7 @@ def save_checkpoint(input_ckpt, output_ckpt_filepath, accelerator, args):
             print('stderr:', s.stderr)
 
 
-def save_diffusers(output_dir, step_num, accelerator, unet, text_encoder, args, finished=None):
+def save_diffusers(output_dir, step_num, accelerator, unet, text_encoder, args):
     """
     Save the in-progress model weights and a converted checkpoint.
     """
@@ -412,9 +412,9 @@ def main():
     args = parse_args()
     logging_dir = Path(args.output_dir, args.logging_dir)
 
-    # TensorFlow will throw an error if we pass it a dict so this is a little hack to make it happy
+    # TensorFlow will get upset if we pass it a dict
     save_manual = args.save_manual
-    del args.save_manual_steps  # just remove it lmao
+    del args.save_manual_steps
 
     accelerator = Accelerator(
         gradient_accumulation_steps=args.gradient_accumulation_steps,
@@ -447,7 +447,6 @@ def main():
                 args.pretrained_model_name_or_path,
                 torch_dtype=torch_dtype,
                 # Setting the safety checker to null allows us to resume from a diffusers checkpoint that doesn't have one
-                feature_extractor=None,
                 safety_checker=None,
             )
             pipeline.set_progress_bar_config(disable=True)
