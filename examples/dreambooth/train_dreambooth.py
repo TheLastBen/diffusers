@@ -482,6 +482,11 @@ def main():
       text_encoder = CLIPTextModel.from_pretrained(args.pretrained_model_name_or_path, subfolder="text_encoder")
     vae = AutoencoderKL.from_pretrained(args.pretrained_model_name_or_path, subfolder="vae")
     unet = UNet2DConditionModel.from_pretrained(args.pretrained_model_name_or_path, subfolder="unet")
+    
+    try:
+        unet.set_use_memory_efficient_attention_xformers(True)
+    except Exception as e:
+        print("Continuining without using xformers. " + e)
 
     vae.requires_grad_(False)
     if not args.train_text_encoder:
