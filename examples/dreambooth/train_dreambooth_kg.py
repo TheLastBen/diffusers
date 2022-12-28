@@ -261,6 +261,19 @@ def parse_args():
         help="Current session directory",
     )    
 
+    parser.add_argument(
+        "--external_captions",
+        action="store_true",
+        default=False,        
+        help="Use captions stored in a txt file",
+    )    
+    
+    parser.add_argument(
+        "--captions_dir",
+        type=str,
+        default="",
+        help="The folder where captions files are stored",
+    )        
     
     
 
@@ -350,16 +363,26 @@ class DreamBoothDataset(Dataset):
         
         if self.image_captions_filename:
             filename = Path(path).stem
+            
             pt=''.join([i for i in filename if not i.isdigit()])
             pt=pt.replace("_"," ")
             pt=pt.replace("(","")
             pt=pt.replace(")","")
             pt=pt.replace("-","")
-            pt=pt.replace("conceptimagedb","")            
-            if args.Style:
-              instance_prompt = ""
+            pt=pt.replace("conceptimagedb","")  
+            
+            if args.external_captions:
+              cptpth=os.path.join(args.captions_dir, filename+'.txt')
+              if os.path.exists(cptpth):
+                with open(cptpth, "r") as f:
+                   instance_prompt=pt+' '+f.read()
+              else:
+                instance_prompt=pt
             else:
-              instance_prompt = pt
+                if args.Style:
+                  instance_prompt = ""
+                else:
+                  instance_prompt = pt
             #sys.stdout.write(" [0;32m" +instance_prompt+" [0m")
             #sys.stdout.flush()
 
@@ -730,7 +753,7 @@ def main():
             if global_step >= args.max_train_steps:
                 break
 
-            if args.train_text_encoder and global_step == args.stop_text_encoder_training and global_step >= 30:
+            if args.train_text_encoder and global_step == args.stop_text_encoder_training and global_step >= 5:
               if accelerator.is_main_process:
                 print(" [0;32m" +" Freezing the text_encoder ..."+" [0m")                
                 frz_dir=args.output_dir + "/text_encoder_frozen"
@@ -772,6 +795,9 @@ def main():
                      subprocess.call('rm -r '+ save_dir, shell=True)                      
                      i=i+args.save_n_steps
             
+            if args.external_captions and global_step == args.stop_text_encoder_training and global_step >= 5:
+                 subprocess.call('mv '+args.captions_dir+' '+args.captions_dir+'off', shell=True)
+                                       
         accelerator.wait_for_everyone()
 
     # Create the pipeline using using the trained modules and save it.
@@ -820,6 +846,9 @@ def main():
 
         if args.push_to_hub:
             repo.push_to_hub(commit_message="End of training", blocking=False, auto_lfs_prune=True)
+            
+      if os.path.exists(args.captions_dir+'off'):
+          subprocess.call('mv '+args.captions_dir+'off '+args.captions_dir, shell=True)            
 
     accelerator.end_training()
 
