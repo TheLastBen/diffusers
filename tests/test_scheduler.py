@@ -129,9 +129,7 @@ class SchedulerBaseTests(unittest.TestCase):
         assert cap_logger_1.out == ""
         assert (
             cap_logger_2.out
-            == "The config attributes {'unexpected': True} were passed to SchedulerObject, but are not expected and"
-            " will"
-            " be ignored. Please verify your config.json configuration file.\n"
+            == ""
         )
         assert cap_logger_2.out.replace("SchedulerObject", "SchedulerObject2") == cap_logger_3.out
 
@@ -166,9 +164,7 @@ class SchedulerBaseTests(unittest.TestCase):
 
         assert (
             cap_logger.out
-            == "The config attributes {'unexpected': True} were passed to SchedulerObject, but are not expected and"
-            " will"
-            " be ignored. Please verify your config.json configuration file.\n"
+            == ""
         )
 
     def test_save_load_from_different_config_comp_schedulers(self):
