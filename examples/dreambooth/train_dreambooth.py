@@ -22,7 +22,7 @@ from PIL import Image
 from torchvision import transforms
 from tqdm.auto import tqdm
 from transformers import CLIPTextModel, CLIPTokenizer
-
+from conv import *
 
 logger = get_logger(__name__)
 
@@ -160,7 +160,6 @@ def parse_args():
     parser.add_argument("--adam_weight_decay", type=float, default=1e-2, help="Weight decay to use.")
     parser.add_argument("--adam_epsilon", type=float, default=1e-08, help="Epsilon value for the Adam optimizer")
     parser.add_argument("--max_grad_norm", default=1.0, type=float, help="Max gradient norm.")
-    parser.add_argument("--push_to_hub", action="store_true", help="Whether or not to push the model to the Hub.")
     parser.add_argument("--hub_token", type=str, default=None, help="The token to use to push to the Model Hub.")
     parser.add_argument(
         "--hub_model_id",
@@ -488,22 +487,6 @@ def main():
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
-    # Handle the repository creation
-    if accelerator.is_main_process:
-        if args.push_to_hub:
-            if args.hub_model_id is None:
-                repo_name = get_full_repo_name(Path(args.output_dir).name, token=args.hub_token)
-            else:
-                repo_name = args.hub_model_id
-            repo = Repository(args.output_dir, clone_from=repo_name)
-
-            with open(os.path.join(args.output_dir, ".gitignore"), "w+") as gitignore:
-                if "step_*" not in gitignore:
-                    gitignore.write("step_*\n")
-                if "epoch_*" not in gitignore:
-                    gitignore.write("epoch_*\n")
-        elif args.output_dir is not None:
-            os.makedirs(args.output_dir, exist_ok=True)
 
     # Load the tokenizer
     if args.tokenizer_name:
@@ -744,51 +727,24 @@ def main():
 
             if global_step >= args.max_train_steps:
                 break
-
-            if args.train_text_encoder and global_step == args.stop_text_encoder_training and global_step >= 5:
-              if accelerator.is_main_process:
-                print(" [0;32m" +" Freezing the text_encoder ..."+" [0m")                
-                frz_dir=args.output_dir + "/text_encoder_frozen"
-                if os.path.exists(frz_dir):
-                  subprocess.call('rm -r '+ frz_dir, shell=True)
-                os.mkdir(frz_dir)
-                pipeline = StableDiffusionPipeline.from_pretrained(
-                    args.pretrained_model_name_or_path,
-                    unet=accelerator.unwrap_model(unet),
-                    text_encoder=accelerator.unwrap_model(text_encoder),
-                )
-                pipeline.text_encoder.save_pretrained(frz_dir)
-                         
+                       
             if args.save_n_steps >= 200:
                if global_step < args.max_train_steps and global_step+1==i:
-                  ckpt_name = "_step_" + str(global_step+1)
-                  save_dir = Path(args.output_dir+ckpt_name)
-                  save_dir=str(save_dir)
-                  save_dir=save_dir.replace(" ", "_")                    
-                  if not os.path.exists(save_dir):
-                     os.mkdir(save_dir)
-                  inst=save_dir[16:]
-                  inst=inst.replace(" ", "_")
+                  inst=os.path.basename(args.Session_dir)
+                  inst =inst + "_step_" + str(global_step+1)
                   print(" [1;32mSAVING CHECKPOINT...")
-                  # Create the pipeline using the trained modules and save it.
                   if accelerator.is_main_process:
                      pipeline = StableDiffusionPipeline.from_pretrained(
                            args.pretrained_model_name_or_path,
                            unet=accelerator.unwrap_model(unet),
                            text_encoder=accelerator.unwrap_model(text_encoder),
-                     )
-                     pipeline.save_pretrained(save_dir)
-                     frz_dir=args.output_dir + "/text_encoder_frozen"                    
-                     if args.train_text_encoder and os.path.exists(frz_dir):
-                        subprocess.call('rm -r '+save_dir+'/text_encoder/*.*', shell=True)
-                        subprocess.call('cp -f '+frz_dir +'/*.* '+ save_dir+'/text_encoder', shell=True)                     
+                     )               
                      chkpth=args.Session_dir+"/"+inst+".ckpt"
                      if args.mixed_precision=="fp16":
-                        subprocess.call('python /content/diffusers/scripts/convertosdv2.py ' + save_dir + ' ' + chkpth + ' --fp16', shell=True)
+                        save_stable_diffusion_checkpoint(unet.config.cross_attention_dim == 1024, chkpth, pipeline.text_encoder, pipeline.unet, None, 0, 0, torch.float16, pipeline.vae)
                      else:
-                        subprocess.call('python /content/diffusers/scripts/convertosdv2.py ' + save_dir + ' ' + chkpth, shell=True)
+                        save_stable_diffusion_checkpoint(unet.config.cross_attention_dim == 1024, chkpth, pipeline.text_encoder, pipeline.unet, None, 0, 0, None, pipeline.vae)
                      print("Done, resuming training ...[0m")   
-                     subprocess.call('rm -r '+ save_dir, shell=True)
                      i=i+args.save_n_steps
                     
             if args.external_captions and global_step == args.stop_text_encoder_training and global_step >= 5:
@@ -805,16 +761,16 @@ def main():
                  args.pretrained_model_name_or_path,
                  text_encoder=accelerator.unwrap_model(text_encoder),
              )
-             pipeline.save_pretrained(args.output_dir)               
+             pipeline.save_pretrained(args.output_dir)     
          else:
              if not os.path.exists(txt_dir):
-               os.mkdir(txt_dir)            
+               os.mkdir(txt_dir)
              pipeline = StableDiffusionPipeline.from_pretrained(
                  args.pretrained_model_name_or_path,
                  unet=accelerator.unwrap_model(unet),
                  text_encoder=accelerator.unwrap_model(text_encoder),
              )
-             pipeline.text_encoder.save_pretrained(txt_dir)       
+             pipeline.text_encoder.save_pretrained(txt_dir)
 
       elif args.train_only_unet:
         pipeline = StableDiffusionPipeline.from_pretrained(
@@ -823,25 +779,11 @@ def main():
             text_encoder=accelerator.unwrap_model(text_encoder),
         )
         pipeline.save_pretrained(args.output_dir)
+
         txt_dir=args.output_dir + "/text_encoder_trained"
         if os.path.exists(txt_dir):
            subprocess.call('rm -r '+txt_dir, shell=True)
-     
-      else:
-        pipeline = StableDiffusionPipeline.from_pretrained(
-            args.pretrained_model_name_or_path,
-            unet=accelerator.unwrap_model(unet),
-            text_encoder=accelerator.unwrap_model(text_encoder),
-        )
-        frz_dir=args.output_dir + "/text_encoder_frozen"
-        pipeline.save_pretrained(args.output_dir)
-        if args.train_text_encoder and os.path.exists(frz_dir):
-           subprocess.call('mv -f '+frz_dir +'/*.* '+ args.output_dir+'/text_encoder', shell=True)
-           subprocess.call('rm -r '+ frz_dir, shell=True) 
-
-        if args.push_to_hub:
-            repo.push_to_hub(commit_message="End of training", blocking=False, auto_lfs_prune=True)
-            
+               
       if os.path.exists(args.captions_dir+'off'):
           subprocess.call('mv '+args.captions_dir+'off '+args.captions_dir, shell=True)
 
