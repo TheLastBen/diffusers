@@ -761,34 +761,21 @@ def main():
                          
             if args.save_n_steps >= 200:
                if global_step < args.max_train_steps and global_step+1==i:
-                  ckpt_name = "_step_" + str(global_step+1)
-                  save_dir = Path(args.output_dir+ckpt_name)
-                  save_dir=str(save_dir)
-                  save_dir=save_dir.replace(" ", "_")                    
-                  if not os.path.exists(save_dir):
-                     os.mkdir(save_dir)
-                  inst=save_dir[16:]
-                  inst=inst.replace(" ", "_")
+                  inst=os.path.basename(args.Session_dir)
+                  inst =inst + "_step_" + str(global_step+1)
                   print(" [1;32mSAVING CHECKPOINT...")
-                  # Create the pipeline using the trained modules and save it.
                   if accelerator.is_main_process:
                      pipeline = StableDiffusionPipeline.from_pretrained(
                            args.pretrained_model_name_or_path,
                            unet=accelerator.unwrap_model(unet),
                            text_encoder=accelerator.unwrap_model(text_encoder),
-                     )
-                     pipeline.save_pretrained(save_dir)
-                     frz_dir=args.output_dir + "/text_encoder_frozen"                    
-                     if args.train_text_encoder and os.path.exists(frz_dir):
-                        subprocess.call('rm -r '+save_dir+'/text_encoder/*.*', shell=True)
-                        subprocess.call('cp -f '+frz_dir +'/*.* '+ save_dir+'/text_encoder', shell=True)                     
+                     )               
                      chkpth=args.Session_dir+"/"+inst+".ckpt"
                      if args.mixed_precision=="fp16":
-                        subprocess.call('python /diffusers/scripts/convertosdv2.py ' + save_dir + ' ' + chkpth + ' --fp16', shell=True)
+                        save_stable_diffusion_checkpoint(unet.config.cross_attention_dim == 1024, chkpth, pipeline.text_encoder, pipeline.unet, None, 0, 0, torch.float16, pipeline.vae)
                      else:
-                        subprocess.call('python /diffusers/scripts/convertosdv2.py ' + save_dir + ' ' + chkpth, shell=True)
+                        save_stable_diffusion_checkpoint(unet.config.cross_attention_dim == 1024, chkpth, pipeline.text_encoder, pipeline.unet, None, 0, 0, None, pipeline.vae)
                      print("Done, resuming training ...[0m")   
-                     subprocess.call('rm -r '+ save_dir, shell=True)
                      i=i+args.save_n_steps
                     
             if args.external_captions and global_step == args.stop_text_encoder_training and global_step >= 5:
@@ -805,16 +792,16 @@ def main():
                  args.pretrained_model_name_or_path,
                  text_encoder=accelerator.unwrap_model(text_encoder),
              )
-             pipeline.save_pretrained(args.output_dir)               
+             pipeline.save_pretrained(args.output_dir)     
          else:
              if not os.path.exists(txt_dir):
-               os.mkdir(txt_dir)            
+               os.mkdir(txt_dir)
              pipeline = StableDiffusionPipeline.from_pretrained(
                  args.pretrained_model_name_or_path,
                  unet=accelerator.unwrap_model(unet),
                  text_encoder=accelerator.unwrap_model(text_encoder),
              )
-             pipeline.text_encoder.save_pretrained(txt_dir)       
+             pipeline.text_encoder.save_pretrained(txt_dir)
 
       elif args.train_only_unet:
         pipeline = StableDiffusionPipeline.from_pretrained(
@@ -823,25 +810,11 @@ def main():
             text_encoder=accelerator.unwrap_model(text_encoder),
         )
         pipeline.save_pretrained(args.output_dir)
+
         txt_dir=args.output_dir + "/text_encoder_trained"
         if os.path.exists(txt_dir):
            subprocess.call('rm -r '+txt_dir, shell=True)
-     
-      else:
-        pipeline = StableDiffusionPipeline.from_pretrained(
-            args.pretrained_model_name_or_path,
-            unet=accelerator.unwrap_model(unet),
-            text_encoder=accelerator.unwrap_model(text_encoder),
-        )
-        frz_dir=args.output_dir + "/text_encoder_frozen"
-        pipeline.save_pretrained(args.output_dir)
-        if args.train_text_encoder and os.path.exists(frz_dir):
-           subprocess.call('mv -f '+frz_dir +'/*.* '+ args.output_dir+'/text_encoder', shell=True)
-           subprocess.call('rm -r '+ frz_dir, shell=True) 
-
-        if args.push_to_hub:
-            repo.push_to_hub(commit_message="End of training", blocking=False, auto_lfs_prune=True)
-            
+               
       if os.path.exists(args.captions_dir+'off'):
           subprocess.call('mv '+args.captions_dir+'off '+args.captions_dir, shell=True)
 
