@@ -777,10 +777,7 @@ def main():
                         save_stable_diffusion_checkpoint(unet.config.cross_attention_dim == 1024, chkpth, pipeline.text_encoder, pipeline.unet, None, 0, 0, None, pipeline.vae)
                      print("Done, resuming training ...[0m")   
                      i=i+args.save_n_steps
-                    
-            if args.external_captions and global_step == args.stop_text_encoder_training and global_step >= 5:
-                 subprocess.call('mv '+args.captions_dir+' '+args.captions_dir+'off', shell=True)
-            
+        
         accelerator.wait_for_everyone()
 
     # Create the pipeline using using the trained modules and save it.
@@ -814,11 +811,7 @@ def main():
         txt_dir=args.output_dir + "/text_encoder_trained"
         if os.path.exists(txt_dir):
            subprocess.call('rm -r '+txt_dir, shell=True)
-               
-      if os.path.exists(args.captions_dir+'off'):
-          subprocess.call('mv '+args.captions_dir+'off '+args.captions_dir, shell=True)
 
-            
     accelerator.end_training()
 
 if __name__ == "__main__":
