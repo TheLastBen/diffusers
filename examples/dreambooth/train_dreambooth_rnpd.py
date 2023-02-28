@@ -274,8 +274,13 @@ def parse_args():
         default="",
         help="The folder where captions files are stored",
     )        
-    
-    
+
+    parser.add_argument(
+        "--offset_noise",
+        action="store_true",
+        default=False,
+        help="Offset Noise",
+    )
 
     parser.add_argument("--local_rank", type=int, default=-1, help="For distributed training: local_rank")
 
@@ -684,7 +689,11 @@ def main():
                 latents = latents * 0.18215
 
                 # Sample noise that we'll add to the latents
-                noise = torch.randn_like(latents)
+                if args.offset_noise:
+                  noise = torch.randn_like(latents) + 0.1 * torch.randn(latents.shape[0], latents.shape[1], 1, 1, device=latents.device)
+                else:
+                  noise = torch.randn_like(latents)
+
                 bsz = latents.shape[0]
                 # Sample a random timestep for each image
                 timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz,), device=latents.device)
