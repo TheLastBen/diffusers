@@ -271,7 +271,7 @@ def parse_args():
         "--offset_noise",
         action="store_true",
         default=False,        
-        help="Use captions stored in a txt file",
+        help="Offset Noise",
     )
 
 
