@@ -22,7 +22,7 @@ from PIL import Image
 from torchvision import transforms
 from tqdm.auto import tqdm
 from transformers import CLIPTextModel, CLIPTokenizer
-
+from Conv import *
 
 logger = get_logger(__name__)
 
