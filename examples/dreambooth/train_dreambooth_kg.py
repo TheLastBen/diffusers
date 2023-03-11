@@ -676,6 +676,11 @@ def main():
     train_dataset = LatentsDataset(latents_cache, text_encoder_cache)
     train_dataloader = torch.utils.data.DataLoader(train_dataset, batch_size=1, collate_fn=lambda x: x, shuffle=True)
 
+    del vae
+    if not args.train_text_encoder:
+       del text_encoder
+    torch.cuda.empty_cache()
+    
     # We need to recalculate our total training steps as the size of the training dataloader may have changed.
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
     if overrode_max_train_steps:
