@@ -275,6 +275,12 @@ def parse_args():
         help="The folder where captions files are stored",
     )        
     
+    parser.add_argument(
+        "--offset_noise",
+        action="store_true",
+        default=False,
+        help="Offset Noise",
+    )    
     
 
     parser.add_argument("--local_rank", type=int, default=-1, help="For distributed training: local_rank")
@@ -427,7 +433,19 @@ class PromptDataset(Dataset):
         example["index"] = index
         return example
 
+    
+class LatentsDataset(Dataset):
+    def __init__(self, latents_cache, text_encoder_cache):
+        self.latents_cache = latents_cache
+        self.text_encoder_cache = text_encoder_cache
 
+    def __len__(self):
+        return len(self.latents_cache)
+
+    def __getitem__(self, index):
+        return self.latents_cache[index], self.text_encoder_cache[index]
+
+    
 def get_full_repo_name(model_id: str, organization: Optional[str] = None, token: Optional[str] = None):
     if token is None:
         token = HfFolder.get_token()
@@ -642,6 +660,20 @@ def main():
     if not args.train_text_encoder:
         text_encoder.to(accelerator.device, dtype=weight_dtype)
 
+    latents_cache = []
+    text_encoder_cache = []
+    for batch in tqdm(train_dataloader, desc="Caching latents"):
+        with torch.no_grad():
+            batch["pixel_values"] = batch["pixel_values"].to(accelerator.device, non_blocking=True, dtype=weight_dtype)
+            batch["input_ids"] = batch["input_ids"].to(accelerator.device, non_blocking=True)
+            latents_cache.append(vae.encode(batch["pixel_values"]).latent_dist)
+            if args.train_text_encoder:
+                text_encoder_cache.append(batch["input_ids"])
+            else:
+                text_encoder_cache.append(text_encoder(batch["input_ids"])[0])
+    train_dataset = LatentsDataset(latents_cache, text_encoder_cache)
+    train_dataloader = torch.utils.data.DataLoader(train_dataset, batch_size=1, collate_fn=lambda x: x, shuffle=True)
+
     # We need to recalculate our total training steps as the size of the training dataloader may have changed.
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
     if overrode_max_train_steps:
@@ -660,7 +692,7 @@ def main():
     
     # Train!
     total_batch_size = args.train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
-
+    text_enc_context = nullcontext() if args.train_text_encoder else torch.no_grad()
     logger.info("***** Running training *****")
     logger.info(f"  Num examples = {len(train_dataset)}")
     logger.info(f"  Num batches each epoch = {len(train_dataloader)}")
@@ -680,11 +712,16 @@ def main():
         for step, batch in enumerate(train_dataloader):
             with accelerator.accumulate(unet):
                 # Convert images to latent space
-                latents = vae.encode(batch["pixel_values"].to(dtype=weight_dtype)).latent_dist.sample()
-                latents = latents * 0.18215
+                with torch.no_grad():
+                    latent_dist = batch[0][0]
+                    latents = latent_dist.sample() * 0.18215
 
                 # Sample noise that we'll add to the latents
-                noise = torch.randn_like(latents)
+                if args.offset_noise:
+                  noise = torch.randn_like(latents) + 0.1 * torch.randn(latents.shape[0], latents.shape[1], 1, 1, device=latents.device)
+                else:
+                  noise = torch.randn_like(latents)
+
                 bsz = latents.shape[0]
                 # Sample a random timestep for each image
                 timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz,), device=latents.device)
@@ -695,7 +732,11 @@ def main():
                 noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
 
                 # Get the text embedding for conditioning
-                encoder_hidden_states = text_encoder(batch["input_ids"])[0]
+                with text_enc_context:
+                    if args.train_text_encoder:
+                        encoder_hidden_states = text_encoder(batch[0][1])[0]
+                    else:
+                        encoder_hidden_states = batch[0][1]
 
                 # Predict the noise residual
                 model_pred = unet(noisy_latents, timesteps, encoder_hidden_states).sample
@@ -810,10 +851,14 @@ def main():
              pipeline.text_encoder.save_pretrained(txt_dir)
 
       elif args.train_only_unet:
+        if os.path.exists(str(args.output_dir+"/text_encoder_trained")):
+          text_encoder = CLIPTextModel.from_pretrained(args.output_dir, subfolder="text_encoder_trained")
+        else:
+          text_encoder = CLIPTextModel.from_pretrained(args.pretrained_model_name_or_path, subfolder="text_encoder")
+        
         pipeline = StableDiffusionPipeline.from_pretrained(
             args.pretrained_model_name_or_path,
             unet=accelerator.unwrap_model(unet),
-            text_encoder=accelerator.unwrap_model(text_encoder),
         )
         pipeline.save_pretrained(args.output_dir)
 
