@@ -15,6 +15,7 @@ from torch.utils.data import Dataset
 from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import set_seed
+from contextlib import
 from diffusers import AutoencoderKL, DDPMScheduler, PNDMScheduler, StableDiffusionPipeline, UNet2DConditionModel
 from diffusers.optimization import get_scheduler
 from huggingface_hub import HfFolder, Repository, whoami
@@ -663,7 +664,7 @@ def main():
 
     latents_cache = []
     text_encoder_cache = []
-    for batch in tqdm(train_dataloader, desc="Caching latents"):
+    for batch in train_dataloader:
         with torch.no_grad():
             batch["pixel_values"] = batch["pixel_values"].to(accelerator.device, non_blocking=True, dtype=weight_dtype)
             batch["input_ids"] = batch["input_ids"].to(accelerator.device, non_blocking=True)
