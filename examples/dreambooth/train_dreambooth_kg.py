@@ -795,7 +795,7 @@ def main():
             
             logs = {"loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
             progress_bar.set_postfix(**logs)
-            progress_bar.set_description_str("Progress:")
+            progress_bar.set_description_str("Progress")
             accelerator.log(logs, step=global_step)
 
             if global_step >= args.max_train_steps:
