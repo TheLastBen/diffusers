@@ -726,7 +726,7 @@ def main():
                 if args.offset_noise:
                   noise = torch.randn_like(latents) + 0.1 * torch.randn(latents.shape[0], latents.shape[1], 1, 1, device=latents.device)
                 else:
-                  noise = torch.randn_like(latents)
+                  noise = torch.randn_like(latents)*0.6
 
                 bsz = latents.shape[0]
                 # Sample a random timestep for each image
