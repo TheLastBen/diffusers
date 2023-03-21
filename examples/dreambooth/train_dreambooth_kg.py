@@ -720,7 +720,7 @@ def main():
                 # Convert images to latent space
                 with torch.no_grad():
                     latent_dist = batch[0][0]
-                    latents = latent_dist.sample() * 0.18215
+                    latents = latent_dist.sample() * 0.12215
 
                 # Sample noise that we'll add to the latents
                 if args.offset_noise:
