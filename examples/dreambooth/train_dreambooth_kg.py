@@ -376,7 +376,7 @@ class DreamBoothDataset(Dataset):
             pt=pt.replace(")","")
             pt=pt.replace("-","")
             pt=pt.replace("conceptimagedb","")  
-            
+
             if args.external_captions:
               cptpth=os.path.join(args.captions_dir, filename+'.txt')
               if os.path.exists(cptpth):
@@ -388,7 +388,7 @@ class DreamBoothDataset(Dataset):
                 if args.Style:
                   instance_prompt = ""
                 else:
-                  instance_prompt = pt
+                  instance_prompt = "test"
             #sys.stdout.write(" [0;32m" +instance_prompt+" [0m")
             #sys.stdout.flush()
 
