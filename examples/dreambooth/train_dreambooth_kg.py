@@ -15,6 +15,7 @@ from torch.utils.data import Dataset
 from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import set_seed
+from contextlib import nullcontext
 from diffusers import AutoencoderKL, DDPMScheduler, PNDMScheduler, StableDiffusionPipeline, UNet2DConditionModel
 from diffusers.optimization import get_scheduler
 from huggingface_hub import HfFolder, Repository, whoami
@@ -22,7 +23,7 @@ from PIL import Image
 from torchvision import transforms
 from tqdm import tqdm
 from transformers import CLIPTextModel, CLIPTokenizer
-
+from Conv import *
 
 logger = get_logger(__name__)
 
@@ -157,7 +158,7 @@ def parse_args():
     )
     parser.add_argument("--adam_beta1", type=float, default=0.9, help="The beta1 parameter for the Adam optimizer.")
     parser.add_argument("--adam_beta2", type=float, default=0.999, help="The beta2 parameter for the Adam optimizer.")
-    parser.add_argument("--adam_weight_decay", type=float, default=1e-2, help="Weight decay to use.")
+    parser.add_argument("--adam_weight_decay", type=float, default=0, help="Weight decay to use.")
     parser.add_argument("--adam_epsilon", type=float, default=1e-08, help="Epsilon value for the Adam optimizer")
     parser.add_argument("--max_grad_norm", default=1.0, type=float, help="Max gradient norm.")
     parser.add_argument("--push_to_hub", action="store_true", help="Whether or not to push the model to the Hub.")
@@ -274,14 +275,20 @@ def parse_args():
         default="",
         help="The folder where captions files are stored",
     )        
-    
+
     parser.add_argument(
         "--offset_noise",
         action="store_true",
         default=False,
         help="Offset Noise",
-    )    
+    )
     
+    parser.add_argument(
+        "--PNDM",
+        action="store_true",
+        default=False,
+        help="Use PNDM noise scheduler",
+    )    
 
     parser.add_argument("--local_rank", type=int, default=-1, help="For distributed training: local_rank")
 
@@ -349,7 +356,7 @@ class DreamBoothDataset(Dataset):
         self.image_transforms = transforms.Compose(
             [
                 #transforms.Resize(size, interpolation=transforms.InterpolationMode.BILINEAR),
-                transforms.CenterCrop(size) if center_crop else transforms.RandomCrop(size),
+                #transforms.CenterCrop(size) if center_crop else transforms.RandomCrop(size),
                 transforms.ToTensor(),
                 transforms.Normalize([0.5], [0.5]),
             ]
@@ -376,7 +383,7 @@ class DreamBoothDataset(Dataset):
             pt=pt.replace(")","")
             pt=pt.replace("-","")
             pt=pt.replace("conceptimagedb","")  
-
+            
             if args.external_captions:
               cptpth=os.path.join(args.captions_dir, filename+'.txt')
               if os.path.exists(cptpth):
@@ -388,7 +395,7 @@ class DreamBoothDataset(Dataset):
                 if args.Style:
                   instance_prompt = ""
                 else:
-                  instance_prompt = "test"
+                  instance_prompt = pt
             #sys.stdout.write(" [0;32m" +instance_prompt+" [0m")
             #sys.stdout.flush()
 
@@ -433,7 +440,6 @@ class PromptDataset(Dataset):
         example["index"] = index
         return example
 
-    
 class LatentsDataset(Dataset):
     def __init__(self, latents_cache, text_encoder_cache):
         self.latents_cache = latents_cache
@@ -445,7 +451,6 @@ class LatentsDataset(Dataset):
     def __getitem__(self, index):
         return self.latents_cache[index], self.text_encoder_cache[index]
 
-    
 def get_full_repo_name(model_id: str, organization: Optional[str] = None, token: Optional[str] = None):
     if token is None:
         token = HfFolder.get_token()
@@ -552,6 +557,9 @@ def main():
     if not args.train_text_encoder:
         text_encoder.requires_grad_(False)
 
+    unet.enable_xformers_memory_efficient_attention()
+    vae.enable_xformers_memory_efficient_attention()
+
     if args.gradient_checkpointing:
         unet.enable_gradient_checkpointing()
         if args.train_text_encoder:
@@ -559,7 +567,7 @@ def main():
 
     if args.scale_lr:
         args.learning_rate = (
-            args.learning_rate * args.gradient_accumulation_steps * 1 * accelerator.num_processes
+            args.learning_rate * args.gradient_accumulation_steps * args.train_batch_size * accelerator.num_processes
         )
 
     # Use 8-bit Adam for lower memory usage or to fine-tune the model in 16GB GPUs
@@ -586,9 +594,11 @@ def main():
         eps=args.adam_epsilon,
     )
 
-    noise_scheduler = DDPMScheduler.from_config(args.pretrained_model_name_or_path, subfolder="scheduler")
-    #noise_scheduler = PNDMScheduler.from_config(args.pretrained_model_name_or_path, subfolder="scheduler")
-
+    if not args.PNDM:
+        noise_scheduler = DDPMScheduler.from_config(args.pretrained_model_name_or_path, subfolder="scheduler")
+    else:
+        noise_scheduler = PNDMScheduler.from_config(args.pretrained_model_name_or_path, subfolder="scheduler")
+    
     train_dataset = DreamBoothDataset(
         instance_data_root=args.instance_data_dir,
         instance_prompt=args.instance_prompt,
@@ -678,8 +688,8 @@ def main():
     del vae
     if not args.train_text_encoder:
        del text_encoder
-    torch.cuda.empty_cache()
-    
+    torch.cuda.empty_cache()        
+
     # We need to recalculate our total training steps as the size of the training dataloader may have changed.
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
     if overrode_max_train_steps:
@@ -696,6 +706,20 @@ def main():
        br='|'+'█' * prg + ' ' * (25-prg)+'|'
        return br
     
+    def apply_snr_weight(loss, timesteps, noise_scheduler, gamma): 
+      alphas_cumprod = noise_scheduler.alphas_cumprod
+      sqrt_alphas_cumprod = torch.sqrt(alphas_cumprod)
+      sqrt_one_minus_alphas_cumprod = torch.sqrt(1.0 - alphas_cumprod)
+      alpha = sqrt_alphas_cumprod
+      sigma = sqrt_one_minus_alphas_cumprod
+      all_snr = (alpha / sigma) ** 2
+      snr = torch.stack([all_snr[t] for t in timesteps])
+      gamma_over_snr = torch.div(torch.ones_like(snr)*gamma,snr)
+      snr_weight = torch.minimum(gamma_over_snr,torch.ones_like(gamma_over_snr)).float() #from paper
+      loss = loss * snr_weight
+      return loss
+  
+   
     # Train!
     total_batch_size = args.train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
     text_enc_context = nullcontext() if args.train_text_encoder else torch.no_grad()
@@ -720,13 +744,13 @@ def main():
                 # Convert images to latent space
                 with torch.no_grad():
                     latent_dist = batch[0][0]
-                    latents = latent_dist.sample() * 0.12215
+                    latents = latent_dist.sample() * 0.18215
 
                 # Sample noise that we'll add to the latents
                 if args.offset_noise:
                   noise = torch.randn_like(latents) + 0.1 * torch.randn(latents.shape[0], latents.shape[1], 1, 1, device=latents.device)
                 else:
-                  noise = torch.randn_like(latents)*0.6
+                  noise = torch.randn_like(latents)
 
                 bsz = latents.shape[0]
                 # Sample a random timestep for each image
@@ -752,33 +776,18 @@ def main():
                     target = noise
                 elif noise_scheduler.config.prediction_type == "v_prediction":
                     target = noise_scheduler.get_velocity(latents, noise, timesteps)
-                else:
-                    raise ValueError(f"Unknown prediction type {noise_scheduler.config.prediction_type}")
 
-                if args.with_prior_preservation:
-                    # Chunk the noise and model_pred into two parts and compute the loss on each part separately.
-                    model_pred, model_pred_prior = torch.chunk(model_pred, 2, dim=0)
-                    target, target_prior = torch.chunk(target, 2, dim=0)
-
-                    # Compute instance loss
-                    loss = F.mse_loss(model_pred.float(), target.float(), reduction="none").mean([1, 2, 3]).mean()
-
-                    # Compute prior loss
-                    prior_loss = F.mse_loss(model_pred_prior.float(), target_prior.float(), reduction="mean")
-
-                    # Add the prior loss to the instance loss.
-                    loss = loss + args.prior_loss_weight * prior_loss
-                else:
-                    loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
+                loss = F.huber_loss(model_pred.float(), target.float(), reduction="mean") if args.train_text_encoder else F.mse_loss(model_pred.float(), target.float(), reduction="mean")
+                
+                #loss = apply_snr_weight(loss, timesteps, noise_scheduler, 5)
+                #loss=loss.mean()
 
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
                     params_to_clip = (
-                        itertools.chain(unet.parameters(), text_encoder.parameters())
-                        if args.train_text_encoder
-                        else unet.parameters()
-                    )
-                    accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
+                        itertools.chain(unet.parameters()))
+
+                    accelerator.clip_grad_norm_(params_to_clip, 2)
                 optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad()
@@ -794,26 +803,12 @@ def main():
             
             logs = {"loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
             progress_bar.set_postfix(**logs)
-            progress_bar.set_description_str("Progress")
+            progress_bar.set_description_str("Progress:")
             accelerator.log(logs, step=global_step)
 
             if global_step >= args.max_train_steps:
                 break
-
-            if args.train_text_encoder and global_step == args.stop_text_encoder_training and global_step >= 5:
-              if accelerator.is_main_process:
-                print(" [0;32m" +" Freezing the text_encoder ..."+" [0m")                
-                frz_dir=args.output_dir + "/text_encoder_frozen"
-                if os.path.exists(frz_dir):
-                  subprocess.call('rm -r '+ frz_dir, shell=True)
-                os.mkdir(frz_dir)
-                pipeline = StableDiffusionPipeline.from_pretrained(
-                    args.pretrained_model_name_or_path,
-                    unet=accelerator.unwrap_model(unet),
-                    text_encoder=accelerator.unwrap_model(text_encoder),
-                )
-                pipeline.text_encoder.save_pretrained(frz_dir)
-                         
+                        
             if args.save_n_steps >= 200:
                if global_step < args.max_train_steps and global_step+1==i:
                   inst=os.path.basename(args.Session_dir)
@@ -857,7 +852,11 @@ def main():
              pipeline.text_encoder.save_pretrained(txt_dir)
 
       elif args.train_only_unet:
-        
+        if os.path.exists(str(args.output_dir+"/text_encoder_trained")):
+          text_encoder = CLIPTextModel.from_pretrained(args.output_dir, subfolder="text_encoder_trained")
+        else:
+          text_encoder = CLIPTextModel.from_pretrained(args.pretrained_model_name_or_path, subfolder="text_encoder")
+          
         pipeline = StableDiffusionPipeline.from_pretrained(
             args.pretrained_model_name_or_path,
             unet=accelerator.unwrap_model(unet),
