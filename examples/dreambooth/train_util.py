@@ -32,7 +32,7 @@ import model_util as model_util
 
 # Tokenizer: checkpointから読み込むのではなくあらかじめ提供されているものを使う
 TOKENIZER_PATH = "openai/clip-vit-large-patch14"
-V2_STABLE_DIFFUSION_PATH = "stabilityai/stable-diffusion-2"     # ここからtokenizerだけ使う v2とv2.1はtokenizer仕様は同じ
+V2_STABLE_DIFFUSION_PATH = "stabilityai/stable-diffusion-2"
 
 # checkpointファイル名
 EPOCH_STATE_NAME = "{}-{:06d}-state"
@@ -45,7 +45,6 @@ DEFAULT_LAST_OUTPUT_NAME = "last"
 # region dataset
 
 IMAGE_EXTENSIONS = [".png", ".jpg", ".jpeg", ".webp", ".bmp"]
-# , ".PNG", ".JPG", ".JPEG", ".WEBP", ".BMP"]         # Linux?
 
 
 class ImageInfo():
@@ -90,7 +89,7 @@ class BucketManager():
       random.shuffle(bucket)
 
   def sort(self):
-    # 解像度順にソートする（表示時、メタデータ格納時の見栄えをよくするためだけ）。bucketsも入れ替えてreso_to_idも振り直す
+
     sorted_resos = self.resos.copy()
     sorted_resos.sort()
 
@@ -154,8 +153,7 @@ class BucketManager():
         resized_height = self.max_area / resized_width
         assert abs(resized_width / resized_height - aspect_ratio) < 1e-2, "aspect is illegal"
 
-        # リサイズ後の短辺または長辺をreso_steps単位にする：aspect ratioの差が少ないほうを選ぶ
-        # 元のbucketingと同じロジック
+
         b_width_rounded = self.round_to_steps(resized_width)
         b_height_in_wr = self.round_to_steps(b_width_rounded / aspect_ratio)
         ar_width_rounded = b_width_rounded / b_height_in_wr
@@ -164,8 +162,6 @@ class BucketManager():
         b_width_in_hr = self.round_to_steps(b_height_rounded * aspect_ratio)
         ar_height_rounded = b_width_in_hr / b_height_rounded
 
-        # print(b_width_rounded, b_height_in_wr, ar_width_rounded)
-        # print(b_width_in_hr, b_height_rounded, ar_height_rounded)
 
         if abs(ar_width_rounded - aspect_ratio) < abs(ar_height_rounded - aspect_ratio):
           resized_size = (b_width_rounded, int(b_width_rounded / aspect_ratio + .5))
@@ -335,9 +331,7 @@ class BaseDataset(torch.utils.data.Dataset):
       input_ids = input_ids.squeeze(0)
       iids_list = []
       if self.tokenizer.pad_token_id == self.tokenizer.eos_token_id:
-        # v1
-        # 77以上の時は "<BOS> .... <EOS> <EOS> <EOS>" でトータル227とかになっているので、"<BOS>...<EOS>"の三連に変換する
-        # 1111氏のやつは , で区切る、とかしているようだが　とりあえず単純に
+
         for i in range(1, self.tokenizer_max_length - self.tokenizer.model_max_length + 2, self.tokenizer.model_max_length - 2):  # (1, 152, 75)
           ids_chunk = (input_ids[0].unsqueeze(0),
                        input_ids[i:i + self.tokenizer.model_max_length - 2],
@@ -435,22 +429,6 @@ class BaseDataset(torch.utils.data.Dataset):
       batch_count = int(math.ceil(len(bucket) / self.batch_size))
       for batch_index in range(batch_count):
         self.buckets_indices.append(BucketBatchIndex(bucket_index, self.batch_size, batch_index))
-
-      # ↓以下はbucketごとのbatch件数があまりにも増えて混乱を招くので元に戻す
-      # 　学習時はステップ数がランダムなので、同一画像が同一batch内にあってもそれほど悪影響はないであろう、と考えられる
-      #
-      # # bucketが細分化されることにより、ひとつのbucketに一種類の画像のみというケースが増え、つまりそれは
-      # # ひとつのbatchが同じ画像で占められることになるので、さすがに良くないであろう
-      # # そのためバッチサイズを画像種類までに制限する
-      # # ただそれでも同一画像が同一バッチに含まれる可能性はあるので、繰り返し回数が少ないほうがshuffleの品質は良くなることは間違いない？
-      # # TO DO 正則化画像をepochまたがりで利用する仕組み
-      # num_of_image_types = len(set(bucket))
-      # bucket_batch_size = min(self.batch_size, num_of_image_types)
-      # batch_count = int(math.ceil(len(bucket) / bucket_batch_size))
-      # # print(bucket_index, num_of_image_types, bucket_batch_size, batch_count)
-      # for batch_index in range(batch_count):
-      #   self.buckets_indices.append(BucketBatchIndex(bucket_index, bucket_batch_size, batch_index))
-      # ↑ここまで
 
     self.shuffle_buckets()
     self._length = len(self.buckets_indices)
