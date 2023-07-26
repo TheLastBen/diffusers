@@ -158,7 +158,7 @@ def parse_args():
     )
     parser.add_argument("--adam_beta1", type=float, default=0.9, help="The beta1 parameter for the Adam optimizer.")
     parser.add_argument("--adam_beta2", type=float, default=0.999, help="The beta2 parameter for the Adam optimizer.")
-    parser.add_argument("--adam_weight_decay", type=float, default=0, help="Weight decay to use.")
+    parser.add_argument("--adam_weight_decay", type=float, default=1e-02, help="Weight decay to use.")
     parser.add_argument("--adam_epsilon", type=float, default=1e-08, help="Epsilon value for the Adam optimizer")
     parser.add_argument("--max_grad_norm", default=1.0, type=float, help="Max gradient norm.")
     parser.add_argument("--push_to_hub", action="store_true", help="Whether or not to push the model to the Hub.")
@@ -208,7 +208,7 @@ def parse_args():
     parser.add_argument(
         "--stop_text_encoder_training",
         type=int,
-        default=1000000,
+        default=100000,
         help=("The step at which the text_encoder is no longer trained"),
     )
 
@@ -396,8 +396,6 @@ class DreamBoothDataset(Dataset):
                   instance_prompt = ""
                 else:
                   instance_prompt = pt
-            #sys.stdout.write(" [0;32m" +instance_prompt+" [0m")
-            #sys.stdout.flush()
 
 
         example["instance_images"] = self.image_transforms(instance_image)
@@ -472,9 +470,6 @@ def main():
         logging_dir=logging_dir,
     )
 
-    # Currently, it's not possible to do gradient accumulation when training two models with accelerate.accumulate
-    # This will be enabled soon in accelerate. For now, we don't allow gradient accumulation when training two models.
-    # TODO (patil-suraj): Remove this check when gradient accumulation with two models is enabled in accelerate.
     if args.train_text_encoder and args.gradient_accumulation_steps > 1 and accelerator.num_processes > 1:
         raise ValueError(
             "Gradient accumulation is not supported when training the text encoder in distributed training. "
@@ -591,10 +586,7 @@ def main():
         eps=args.adam_epsilon,
     )
 
-    if not args.PNDM:
-        noise_scheduler = DDPMScheduler.from_config(args.pretrained_model_name_or_path, subfolder="scheduler")
-    else:
-        noise_scheduler = PNDMScheduler.from_config(args.pretrained_model_name_or_path, subfolder="scheduler")
+    noise_scheduler = DDPMScheduler.from_config(args.pretrained_model_name_or_path, subfolder="scheduler")
     
     train_dataset = DreamBoothDataset(
         instance_data_root=args.instance_data_dir,
@@ -657,7 +649,7 @@ def main():
 
     weight_dtype = torch.float32
     if args.mixed_precision == "fp16":
-        weight_dtype = torch.float16
+        weight_dtype = torch.bfloat16
     elif args.mixed_precision == "bf16":
         weight_dtype = torch.bfloat16
 
@@ -747,15 +739,13 @@ def main():
                 if args.offset_noise:
                   noise = torch.randn_like(latents) + 0.1 * torch.randn(latents.shape[0], latents.shape[1], 1, 1, device=latents.device)
                 else:
-                  noise = torch.randn_like(latents)
+                  noise = torch.randn_like(latents) + 0.1 * torch.randn(latents.shape[0], latents.shape[1], 1, 1, device=latents.device)
 
                 bsz = latents.shape[0]
                 # Sample a random timestep for each image
                 timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz,), device=latents.device)
                 timesteps = timesteps.long()
 
-                # Add noise to the latents according to the noise magnitude at each timestep
-                # (this is the forward diffusion process)
                 noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
 
                 # Get the text embedding for conditioning
@@ -774,20 +764,20 @@ def main():
                 elif noise_scheduler.config.prediction_type == "v_prediction":
                     target = noise_scheduler.get_velocity(latents, noise, timesteps)
 
-                loss = F.huber_loss(model_pred.float(), target.float(), reduction="mean") if args.train_text_encoder else F.mse_loss(model_pred.float(), target.float(), reduction="mean")
+                loss = F.huber_loss(model_pred.float(), target.float(), reduction="mean")
                 
-                #loss = apply_snr_weight(loss, timesteps, noise_scheduler, 5)
-                #loss=loss.mean()
+                loss = apply_snr_weight(loss, timesteps, noise_scheduler, 5)
+                loss=loss.mean()
 
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
                     params_to_clip = (
                         itertools.chain(unet.parameters()))
 
-                    accelerator.clip_grad_norm_(params_to_clip, 2)
+                    accelerator.clip_grad_norm_(params_to_clip, 0.8)
                 optimizer.step()
                 lr_scheduler.step()
-                optimizer.zero_grad(set_to_none=True if args.train_text_encoder else False)
+                optimizer.zero_grad(set_to_none=True)
 
             # Checks if the accelerator has performed an optimization step behind the scenes
             if accelerator.sync_gradients:
