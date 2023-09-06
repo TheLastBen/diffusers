@@ -2,6 +2,7 @@ import argparse
 import itertools
 import math
 import os
+import re
 from pathlib import Path
 from typing import Optional
 import subprocess
@@ -361,14 +362,13 @@ class DreamBoothDataset(Dataset):
         
         if self.image_captions_filename:
             filename = Path(path).stem
-            
-            pt=''.join([i for i in filename if not i.isdigit()])
-            pt=pt.replace("_"," ")
-            pt=pt.replace("(","")
-            pt=pt.replace(")","")
-            pt=pt.replace("-","")
-            pt=pt.replace("conceptimagedb","")  
-            
+
+            # Replace underscores for spaces
+            pt=filename.replace("_"," ")
+            pt=pt.replace("conceptimagedb","")
+            # Remove trailing spaces, parens and numbers (e.g. " (1)")
+            pt=re.sub(r' *[0-9()]*$', '', pt)
+       
             if args.external_captions:
               cptpth=os.path.join(args.captions_dir, filename+'.txt')
               if os.path.exists(cptpth):
