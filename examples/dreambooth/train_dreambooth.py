@@ -792,6 +792,17 @@ def main():
         txt_dir=args.output_dir + "/text_encoder_trained"
         if os.path.exists(txt_dir):
            subprocess.call('rm -r '+txt_dir, shell=True)
+      else:
+        pipeline = StableDiffusionPipeline.from_pretrained(
+            args.pretrained_model_name_or_path,
+            unet=accelerator.unwrap_model(unet),
+            text_encoder=accelerator.unwrap_model(text_encoder),
+        )
+        frz_dir=args.output_dir + "/text_encoder_frozen"
+        pipeline.save_pretrained(args.output_dir)
+        if args.train_text_encoder and os.path.exists(frz_dir):
+           subprocess.call('mv -f '+frz_dir +'/*.* '+ args.output_dir+'/text_encoder', shell=True)
+           subprocess.call('rm -r '+ frz_dir, shell=True) 
                
             
     accelerator.end_training()
