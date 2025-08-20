@@ -816,7 +816,7 @@ def main():
                 frz_dir=args.output_dir + "/text_encoder_frozen"
                 if os.path.exists(frz_dir):
                   subprocess.call('rm -r '+ frz_dir, shell=True)
-                os.mkdir(frz_dir)
+                os.makedirs(frz_dir)
                 pipeline = StableDiffusionPipeline.from_pretrained(
                     args.pretrained_model_name_or_path,
                     unet=accelerator.unwrap_model(unet),
@@ -866,7 +866,7 @@ def main():
              pipeline.save_pretrained(args.output_dir)     
          else:
              if not os.path.exists(txt_dir):
-               os.mkdir(txt_dir)
+               os.makedirs(txt_dir)
              pipeline = StableDiffusionPipeline.from_pretrained(
                  args.pretrained_model_name_or_path,
                  unet=accelerator.unwrap_model(unet),
@@ -895,3 +895,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
